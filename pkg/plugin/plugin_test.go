@@ -19,7 +19,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/k8snetworkplumbingwg/ovs-cni/pkg/config"
 	"math/rand"
 	"net"
 	"os/exec"
@@ -36,6 +35,7 @@ import (
 	"github.com/containernetworking/plugins/pkg/ip"
 	"github.com/containernetworking/plugins/pkg/ns"
 	"github.com/containernetworking/plugins/pkg/testutils"
+	"github.com/k8snetworkplumbingwg/ovs-cni/pkg/config"
 	"github.com/vishvananda/netlink"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -614,7 +614,7 @@ var testFunc = func(version string) {
 				testDel(conf, hostIfName, targetNs, true)
 			})
 		})
-		Context("invoke DEL action after deleting container net namespace", func() {
+		Context("invoke DEL action after deleting container namespace", func() {
 			conf := fmt.Sprintf(`{
 				"cniVersion": "%s",
 				"name": "mynet",
@@ -678,10 +678,10 @@ var testFunc = func(version string) {
 				}()
 
 				By("Checking that both namespaces have different mac addresses on eth0")
-				resultOne := attach(targetNsOne, conf, IFNAME, "", "")
+				resultOne := attach(targetNsOne, conf, IFNAME, "", "", "")
 				contOneIface := resultOne.Interfaces[0]
 
-				resultTwo := attach(targetNsTwo, conf, IFNAME, "", "")
+				resultTwo := attach(targetNsTwo, conf, IFNAME, "", "", "")
 				contTwoIface := resultTwo.Interfaces[1]
 
 				Expect(contOneIface.Mac).NotTo(Equal(contTwoIface.Mac))
@@ -705,7 +705,7 @@ var testFunc = func(version string) {
 
 				By("Checking that the mac address on eth0 equals to the requested one")
 				mac := "0a:00:00:00:00:80"
-				result := attach(targetNs, conf, IFNAME, mac, "")
+				result := attach(targetNs, conf, IFNAME, mac, "", "")
 				contIface := result.Interfaces[1]
 
 				Expect(contIface.Mac).To(Equal(mac))
@@ -728,11 +728,34 @@ var testFunc = func(version string) {
 				}()
 
 				OvnPort := "test-port"
-				result := attach(targetNs, conf, IFNAME, "", OvnPort)
+				result := attach(targetNs, conf, IFNAME, "", OvnPort, "")
 				hostIface := result.Interfaces[0]
 				output, err := exec.Command("ovs-vsctl", "--column=external_ids", "find", "Interface", fmt.Sprintf("name=%s", hostIface.Name)).CombinedOutput()
 				Expect(err).NotTo(HaveOccurred())
 				Expect(string(output[:len(output)-1])).To(Equal(ovsOutput))
+			})
+		})
+		Context("specific pod id", func() {
+			It("should configure pod id", func() {
+				const ovsOutput = `podID="52a977af-65ae-4e3b-88f7-09dd8d34a54c"`
+
+				conf := fmt.Sprintf(`{
+				"cniVersion": "%s",
+				"name": "mynet",
+				"type": "ovs",
+				"OvnPort": "test-port",
+				"bridge": "%s"}`, version, bridgeName)
+
+				targetNs := newNS()
+				defer func() {
+					closeNS(targetNs)
+				}()
+
+				result := attach(targetNs, conf, IFNAME, "", "", "52a977af-65ae-4e3b-88f7-09dd8d34a54c")
+				hostIface := result.Interfaces[0]
+				output, err := exec.Command("ovs-vsctl", "--column=external_ids", "find", "Port", fmt.Sprintf("name=%s", hostIface.Name)).CombinedOutput()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(string(output[:len(output)-1])).To(ContainSubstring(ovsOutput))
 			})
 		})
 		Context("specified OfportRequest", func() {
@@ -753,7 +776,7 @@ var testFunc = func(version string) {
 					closeNS(targetNs)
 				}()
 
-				result := attach(targetNs, conf, IFNAME, "", "")
+				result := attach(targetNs, conf, IFNAME, "", "", "")
 				hostIface := result.Interfaces[0]
 
 				// Wait for OVS to actually assign the port, even when the add returns
@@ -858,8 +881,8 @@ var testFunc = func(version string) {
 				}()
 
 				// Create two ports for two separate target namespaces.
-				firstResult := attach(firstTargetNs, conf, IFNAME, "", "test-port-1")
-				secondResult := attach(secondTargetNs, conf, IFNAME, "", "test-port-2")
+				firstResult := attach(firstTargetNs, conf, IFNAME, "", "test-port-1", "")
+				secondResult := attach(secondTargetNs, conf, IFNAME, "", "test-port-2", "")
 
 				// Remove the host interface of the first port. This makes the
 				// port faulty. Our test should remove the interfaces of this
@@ -907,7 +930,7 @@ var testFunc = func(version string) {
 	})
 }
 
-func attach(namespace ns.NetNS, conf, ifName, mac, ovnPort string) *current.Result {
+func attach(namespace ns.NetNS, conf, ifName, mac, ovnPort, podID string) *current.Result {
 	extraArgs := ""
 	if mac != "" {
 		extraArgs += fmt.Sprintf("MAC=%s,", mac)
@@ -915,6 +938,10 @@ func attach(namespace ns.NetNS, conf, ifName, mac, ovnPort string) *current.Resu
 
 	if ovnPort != "" {
 		extraArgs += fmt.Sprintf("OvnPort=%s", ovnPort)
+	}
+
+	if podID != "" {
+		extraArgs += fmt.Sprintf("K8S_POD_UID=%s", podID)
 	}
 
 	extraArgs = strings.TrimSuffix(extraArgs, ",")
